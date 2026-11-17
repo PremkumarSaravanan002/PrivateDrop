@@ -32,4 +32,20 @@ public class GlobalExceptionHandler {
                 .status(HttpStatus.BAD_REQUEST)
                 .body(response);
     }
+
+
+    @ExceptionHandler(SecretUnavailableException.class)
+    public ResponseEntity<ApiErrorResponse> handleSecretUnavailableException(
+            SecretUnavailableException exception
+    ){
+        ApiErrorResponse response = new ApiErrorResponse(
+                HttpStatus.NOT_FOUND.value(),
+                "SECRET_UNAVAILABLE",
+                "Secret is unavailable"
+        );
+
+        return ResponseEntity
+                .status(HttpStatus.NOT_FOUND)
+                .body(response);
+    }
 }

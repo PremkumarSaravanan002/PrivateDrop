@@ -2,8 +2,11 @@
 package com.privatedrop.service;
 
 import com.privatedrop.dto.CreateSecretResult;
+import com.privatedrop.dto.RetrieveSecretResult;
 import com.privatedrop.entity.Secret;
+import com.privatedrop.exception.SecretUnavailableException;
 import com.privatedrop.repository.SecretRepository;
+import jakarta.transaction.Transactional;
 import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
@@ -11,6 +14,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.UUID;
 
 @Service
 public class SecretService {
@@ -146,5 +150,48 @@ public class SecretService {
                 savedSecret.getId(),
                 encodedAccessToken
         );
+    }
+
+
+    /*
+    * Adding Transactional as it involves two database operations
+    *   Atomically claim one view using claimView() in secretRepository
+    *   Fetch the encrypted payload and nonce
+    */
+    @Transactional
+    public RetrieveSecretResult retrieveSecret(
+            UUID secretId,
+            byte[] suppliedToken
+    ){
+        if(secretId == null){
+            throw new SecretUnavailableException("Secret ID is required");
+        }
+
+        if(suppliedToken == null || suppliedToken.length != 32){
+            throw new IllegalArgumentException("Invalid Access Token");
+        }
+
+        byte[] tokenHash = hashAccessToken(suppliedToken);
+
+        //claim one view using claimView() in secretRepository
+        int claimedViews = secretRepository.claimView(secretId, tokenHash);
+
+        if(claimedViews != 1){
+            throw new SecretUnavailableException("Secret is unavailable");
+        }
+
+
+        // Fetch the encrypted payload and nonce
+        Secret secret = secretRepository.findById(secretId)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Secret disappeared after claiming a view"
+                ));
+
+        return new RetrieveSecretResult(
+                secret.getEncryptedPayload(),
+                secret.getNonce()
+        );
+
+
     }
 }
