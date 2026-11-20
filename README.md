@@ -1,99 +1,187 @@
 # PrivateDrop Backend
 
-PrivateDrop Backend is an early-stage Spring Boot service for storing **client-encrypted** secrets and revealing them through a random, view-limited access token. The server is designed never to handle plaintext: callers submit an already-encrypted payload and nonce, and the API returns that same encrypted material when a valid token claims a view.
+PrivateDrop is an early-stage Spring Boot backend for secure, temporary secret sharing. It allows clients to store encrypted secret payloads and retrieve them using a randomly generated, view-limited access token.
 
-> **Status: early development / work in progress — not production-ready.** This repository contains backend APIs only. There is no frontend, no browser-side encryption/decryption, and no complete end-to-end secret-sharing workflow here.
+The backend is designed to handle encrypted data only. Encryption and decryption are intended to happen on the client side.
 
-## What it is intended to do
+> **Project status: Work in Progress — Not Production Ready**
+>
+> This repository currently contains the backend implementation. A frontend and complete end-to-end secret-sharing experience are still planned.
 
-A sender encrypts a secret outside this backend, stores the ciphertext with an expiry and a maximum number of views, and shares the returned secret ID together with a one-time-delivered access token. A recipient supplies both to reveal the ciphertext; the server enforces expiry and view limits and returns only opaque encrypted bytes. Decryption is intended to happen in a future client, not in this service.
+## 1. Project Overview
 
-## How the application is designed to work
+PrivateDrop is intended to provide a simple way to share sensitive information temporarily without storing plaintext secrets on the server.
 
-- The backend stores encrypted payload bytes, a nonce, access metadata (expiry, maximum views, view count) and a **SHA-256 hash** of a random access token. It never stores the raw token.
-- The raw token is returned only in the creation response, encoded as Base64URL (encoding, not encryption).
-- Retrieval supplies the token in the `X-Access-Token` header. A single conditional database `UPDATE` atomically checks the secret ID, token hash, expiry and remaining views, and increments the view count. The encrypted payload and nonce are returned only after that claim succeeds.
-- An unavailable secret (wrong token, expired, or no views remaining) produces the same generic HTTP 404 response.
+The planned application flow:
 
-## Current architecture and technology stack
+1. Sender enters a secret in the browser.
+2. Browser encrypts the secret using Web Crypto API and AES-256-GCM.
+3. Backend stores the encrypted payload, nonce, expiry information and access-token hash.
+4. Sender receives a secret ID and access token to share.
+5. Recipient explicitly requests the secret using the access token.
+6. Backend validates the request and returns the encrypted payload.
+7. Browser decrypts the payload using the encryption key held by the client.
 
-**IMPLEMENTED**
+**Important:** Browser-side encryption, decryption and the complete frontend workflow have not yet been implemented in this repository.
 
-- **Language / build:** Java 21, Maven wrapper (`mvnw`, `mvnw.cmd`), Spring Boot 4.1.2 parent, `spring-boot-maven-plugin`.
-- **Web:** `spring-boot-starter-webmvc` (REST controllers).
-- **Data:** `spring-boot-starter-data-jpa`, Spring Data JPA, PostgreSQL JDBC driver (runtime scope).
-- **Security:** `spring-boot-starter-security` (HTTP Basic, CSRF disabled).
-- **Validation / ops:** `spring-boot-starter-validation`, `spring-boot-starter-actuator`.
-- **Testing:** Spring Boot test starters; the only test class is a `@SpringBootTest` context-load test.
-- **Layering:** `controller` → `service` → `repository` → JPA `entity`, with `dto`, `config` (`SecurityConfig`) and `exception` (`GlobalExceptionHandler`) cross-cutting packages. `spring.jpa.open-in-view=false` keeps database access in the service layer.
+## 2. Technology Stack
 
-## Features
+| Component | Technology |
+|---|---|
+| Language | Java 21 |
+| Framework | Spring Boot 4.1.2 |
+| Web | Spring Web MVC |
+| Persistence | Spring Data JPA |
+| Database | PostgreSQL 18 |
+| Security | Spring Security |
+| Build Tool | Maven |
+| Testing | JUnit 5, Mockito, Spring Boot Test |
 
-### IMPLEMENTED
+## 3. Architecture
 
-- Spring Boot application bootstrap and layered package structure.
-- Demo endpoints: greeting, echo (bean-validated) and simple note persistence.
-- **Secret creation** (`POST /api/v1/secrets`): validates payload length (≥ 16 bytes), nonce length (exactly 12 bytes), future expiry and `maxViews ≥ 1`; generates a 32-byte `SecureRandom` token; stores its SHA-256 hash; persists the encrypted payload and nonce.
-- **Secret retrieval** (`POST /api/v1/secrets/{secretId}/reveal`): decodes the `X-Access-Token` header, hashes it, atomically claims one view, then returns the encrypted payload and nonce in a `@Transactional` service method.
-- Generic HTTP 404 handling for unavailable secrets, and HTTP 400 handling for bean-validation failures, via `GlobalExceptionHandler` / `ApiErrorResponse`.
-- PostgreSQL persistence with a database check constraint on view counts.
-- **Manual concurrency verification (not an automated test):** two concurrent PowerShell background jobs against a secret with one allowed view produced one HTTP 200 and one HTTP 404; the database view count was 1 afterwards.
+The backend follows a layered architecture:
 
-### PLANNED / NOT IMPLEMENTED
+```text
+Controller
+    |
+    v
+Service
+    |
+    v
+Repository
+    |
+    v
+PostgreSQL Database
+```
 
-- Frontend, browser-side encryption/decryption and an end-to-end share/reveal user experience.
-- Public, token-based recipient access (all endpoints currently require HTTP Basic authentication).
-- Secret revocation, deletion, status management and expiry cleanup jobs.
-- Consistent API error mapping for malformed input, and automated tests for the secret flows.
-- Production hardening (TLS enforcement, secrets management, abuse controls, audit logging, migration strategy).
+### Main packages
 
-## API documentation
+| Package | Responsibility |
+|---|---|
+| `controller` | Handles REST API requests |
+| `service` | Contains application and business logic |
+| `repository` | Handles database operations |
+| `entity` | Defines JPA database entities |
+| `dto` | Defines request and response objects |
+| `exception` | Handles application exceptions |
+| `config` | Contains application configuration |
 
-All endpoints require HTTP Basic authentication and, for JSON bodies, `Content-Type: application/json`. No custom user store or credentials are configured in this repository; Spring Boot's default auto-configured user applies. Replace every `<...>` placeholder below — these are not real credentials, tokens or encrypted data.
+## 4. Implemented Features
 
-| Method | Path | Headers | Description |
-|---|---|---|---|
-| GET | `/api/v1/hello` | `Authorization` | Demo greeting; returns `Hello from PrivateDrop!!` |
-| POST | `/api/v1/echo` | `Authorization`, `Content-Type` | Validates `message` and echoes it |
-| POST | `/api/v1/notes` | `Authorization`, `Content-Type` | Persists a note (`message` becomes `content`) |
-| POST | `/api/v1/secrets` | `Authorization`, `Content-Type` | Creates a secret; returns `secretId` and `accessToken` |
-| POST | `/api/v1/secrets/{secretId}/reveal` | `Authorization`, `X-Access-Token` | Claims one view and returns the encrypted payload and nonce |
+### Secret Creation
 
-### Create a secret
+**Endpoint:** `POST /api/v1/secrets`
+
+The backend currently:
+
+- Accepts an encrypted payload and nonce.
+- Validates encrypted payload length (minimum 16 bytes).
+- Validates nonce length (exactly 12 bytes).
+- Checks that the expiry time is in the future.
+- Ensures maximum views is at least 1.
+- Generates a cryptographically secure 32-byte access token using `SecureRandom`.
+- Calculates the SHA-256 hash of the access token.
+- Stores the hash instead of the original token.
+- Persists the encrypted payload, nonce and associated metadata.
+- Returns the generated secret ID and raw access token.
+
+The access token is encoded using unpadded Base64URL. Base64URL is encoding, not encryption.
+
+### Secret Retrieval
+
+**Endpoint:** `POST /api/v1/secrets/{secretId}/reveal`
+
+The retrieval process:
+
+1. Accepts the secret ID and access token.
+2. Validates the access-token length.
+3. Calculates the SHA-256 hash of the supplied token.
+4. Executes an atomic conditional database update to claim a view.
+5. Checks the secret ID, token hash, expiry and remaining view count.
+6. Increments the view count only when all conditions are satisfied.
+7. Retrieves and returns the encrypted payload and nonce.
+
+The retrieval operation is transactional.
+
+### View Limit Enforcement
+
+The repository uses a conditional JPQL update to ensure that concurrent requests cannot both claim the final available view.
+
+The update succeeds only when:
+
+- The secret ID matches.
+- The access-token hash matches.
+- The secret has not expired.
+- The current view count is below the maximum allowed views.
+
+A successful claim returns `1`; an unsuccessful claim returns `0`.
+
+### Exception Handling
+
+The application currently includes:
+
+- `SecretUnavailableException` for unavailable secrets.
+- `GlobalExceptionHandler` for handling application exceptions.
+- Generic HTTP 404 responses for unavailable secrets.
+- HTTP 400 responses for supported bean-validation failures.
+
+Wrong tokens, expired secrets and exhausted view limits produce the same generic unavailable-secret response.
+
+## 5. API Documentation
+
+All current endpoints require HTTP Basic authentication and JSON requests require `Content-Type: application/json`.
+
+Spring Boot's default generated user is used; no custom user store is currently configured.
+
+### Available Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/v1/hello` | Demo greeting endpoint |
+| POST | `/api/v1/echo` | Validates and echoes a message |
+| POST | `/api/v1/notes` | Saves a demo note |
+| POST | `/api/v1/secrets` | Creates a temporary secret |
+| POST | `/api/v1/secrets/{secretId}/reveal` | Retrieves encrypted secret data |
+
+### Create Secret
+
+Request:
 
 ```http
-POST /api/v1/secrets HTTP/1.1
-Authorization: Basic <BASIC_AUTH_CREDENTIALS>
+POST /api/v1/secrets
 Content-Type: application/json
+Authorization: Basic <CREDENTIALS>
+```
 
+```json
 {
-  "encryptedPayload": "<BASE64_CIPHERTEXT_AT_LEAST_16_BYTES>",
-  "nonce": "<BASE64_NONCE_EXACTLY_12_BYTES>",
+  "encryptedPayload": "<BASE64_CIPHERTEXT>",
+  "nonce": "<BASE64_NONCE>",
   "expiresAt": "2030-01-01T00:00:00Z",
   "maxViews": 1
 }
 ```
 
-Successful response (`200 OK`):
+Successful response:
 
 ```json
 {
-  "secretId": "00000000-0000-0000-0000-000000000000",
-  "accessToken": "<BASE64URL_TOKEN_RETURNED_BY_CREATE>"
+  "secretId": "<GENERATED_UUID>",
+  "accessToken": "<GENERATED_BASE64URL_TOKEN>"
 }
 ```
 
-`encryptedPayload`, `nonce` and `accessToken` above are placeholders. The token is 32 random bytes encoded as unpadded Base64URL and is the only time the raw token is returned.
+### Reveal Secret
 
-### Reveal a secret
+Request:
 
 ```http
-POST /api/v1/secrets/00000000-0000-0000-0000-000000000000/reveal HTTP/1.1
-Authorization: Basic <BASIC_AUTH_CREDENTIALS>
-X-Access-Token: <BASE64URL_TOKEN_RETURNED_BY_CREATE>
+POST /api/v1/secrets/<SECRET_ID>/reveal
+Authorization: Basic <CREDENTIALS>
+X-Access-Token: <ACCESS_TOKEN>
 ```
 
-Successful response (`200 OK`) — `byte[]` fields are rendered as Base64 strings by Jackson's default JSON handling:
+Successful response:
 
 ```json
 {
@@ -102,7 +190,9 @@ Successful response (`200 OK`) — `byte[]` fields are rendered as Base64 string
 }
 ```
 
-Unavailable secret (`404 Not Found`) — used for a wrong token, an expired secret, or no views remaining:
+### Unavailable Secret Response
+
+HTTP `404 Not Found`:
 
 ```json
 {
@@ -112,102 +202,195 @@ Unavailable secret (`404 Not Found`) — used for a wrong token, an expired secr
 }
 ```
 
-Bean-validation failure example (`400 Bad Request`, e.g. empty echo message):
+The generic response avoids exposing whether the secret is missing, expired, has an invalid token or has exhausted its view limit.
 
-```json
-{
-  "status": 400,
-  "error": "VALIDATION_FAILED",
-  "message": "Message cannot be empty"
-}
+## 6. Database Overview
+
+PrivateDrop currently uses PostgreSQL.
+
+**Connection configuration:**
+
+- Database: `privatedrop`
+- Username: `privatedrop_app`
+- Host: `localhost`
+- Port: `5432`
+- Password: Supplied through the `DB_PASSWORD` environment variable.
+
+### Secrets Table
+
+The `Secret` entity maps to the `secrets` table.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `encrypted_payload` | BYTEA | Encrypted secret data |
+| `nonce` | BYTEA | Encryption nonce |
+| `token_hash` | BYTEA | SHA-256 hash of access token |
+| `expires_at` | TIMESTAMP | Expiration time |
+| `max_views` | INTEGER | Maximum allowed views |
+| `view_count` | INTEGER | Number of successfully claimed views |
+| `created_at` | TIMESTAMP | Creation timestamp |
+| `consumed_at` | TIMESTAMP | Nullable; currently not updated by application code |
+
+A database check constraint enforces:
+
+- `max_views >= 1`
+- `view_count >= 0`
+- `view_count <= max_views`
+
+The entity also defensively copies its byte-array fields.
+
+A separate `note` table supports the demonstration note endpoint.
+
+## 7. Local Development Setup
+
+### Prerequisites
+
+- Java 21
+- PostgreSQL
+- Git
+- IntelliJ IDEA or another Java IDE (optional)
+
+### Step 1: Clone the Repository
+
+```powershell
+git clone https://github.com/PremkumarSaravanan002/PrivateDrop.git
+cd PrivateDrop
 ```
 
-Other malformed inputs (bad Base64, wrong token length, missing `X-Access-Token`, malformed UUID, service validation errors such as a short payload) are **not** mapped by `GlobalExceptionHandler`; Spring Boot's default error handling applies. This inconsistency is planned to be addressed.
+### Step 2: Configure PostgreSQL
 
-## Database overview
+Create the application role and database:
 
-**IMPLEMENTED**
+```sql
+CREATE ROLE privatedrop_app WITH LOGIN PASSWORD '<YOUR_LOCAL_PASSWORD>';
 
-- PostgreSQL at `jdbc:postgresql://localhost:5432/privatedrop`, username `privatedrop_app`, password injected from the `DB_PASSWORD` environment variable.
-- Schema is managed by `spring.jpa.hibernate.ddl-auto=update`; there are no Flyway/Liquibase migrations in this repository.
+CREATE DATABASE privatedrop OWNER privatedrop_app;
+```
 
-`secrets` table (JPA entity `com.privatedrop.entity.Secret`):
+Use your own local password. Never commit database credentials.
 
-| Column | Java type | Notes |
-|---|---|---|
-| `id` | `UUID` | Primary key, generated with `GenerationType.UUID` |
-| `encrypted_payload` | `byte[]` / `BYTEA` | Not null; stored as provided |
-| `nonce` | `byte[]` / `BYTEA` | Not null; stored as provided |
-| `token_hash` | `byte[]` / `BYTEA` | Not null; SHA-256 hash of the access token |
-| `expires_at` | `Instant` | Not null |
-| `max_views` | `int` | Not null |
-| `view_count` | `int` | Not null; incremented by successful claims |
-| `created_at` | `Instant` | Not null; set by `@PrePersist` when absent |
-| `consumed_at` | `Instant` | Nullable field; currently never written by application code |
+### Step 3: Configure Environment Variable
 
-Check constraint `chk_secrets_view_counts`: `max_views >= 1 AND view_count >= 0 AND view_count <= max_views`. Byte-array fields are defensively copied in the entity constructor and getters.
+Windows PowerShell:
 
-A small `note` table backs the demo note endpoint (`Note` entity, `Long` identity primary key, `content` string).
+```powershell
+$env:DB_PASSWORD = '<YOUR_LOCAL_PASSWORD>'
+```
 
-## Local development setup
+macOS/Linux:
 
-1. Install **Java 21** and a local **PostgreSQL** server. No other JDK version is declared by `pom.xml`.
-2. Create a database and role (choose your own local password — do not commit it):
+```bash
+export DB_PASSWORD='<YOUR_LOCAL_PASSWORD>'
+```
 
-   ```sql
-   CREATE ROLE privatedrop_app WITH LOGIN PASSWORD '<YOUR_LOCAL_PASSWORD>';
-   CREATE DATABASE privatedrop OWNER privatedrop_app;
-   ```
+### Step 4: Run the Application
 
-3. Export the only required environment variable, `DB_PASSWORD`, with that same local password.
+Windows PowerShell:
 
-   ```powershell
-   # Windows PowerShell
-   $env:DB_PASSWORD = '<YOUR_LOCAL_PASSWORD>'
-   ```
+```powershell
+.\mvnw.cmd spring-boot:run
+```
 
-   ```bash
-   # macOS / Linux
-   export DB_PASSWORD='<YOUR_LOCAL_PASSWORD>'
-   ```
+macOS/Linux:
 
-4. Run the application with the Maven wrapper (no system Maven installation required):
+```bash
+./mvnw spring-boot:run
+```
 
-   ```powershell
-   # Windows PowerShell
-   .\mvnw.cmd spring-boot:run
-   ```
+The backend starts on:
 
-   ```cmd
-   :: Windows CMD
-   mvnw.cmd spring-boot:run
-   ```
+```text
+http://localhost:8080
+```
 
-   ```bash
-   # macOS / Linux
-   ./mvnw spring-boot:run
-   ```
+## 8. Automated Testing
 
-The service starts on Spring Boot's default port `8080`. `.\mvnw.cmd test` runs the existing context-load test only; there are no automated secret-flow tests.
+The project uses JUnit 5 and Mockito.
 
-## Security design and limitations
+The current `SecretServiceTest` contains six service-level unit tests:
 
-**IMPLEMENTED design**
+| Test | Expected behaviour |
+|---|---|
+| Valid token and available view | Returns encrypted payload and nonce |
+| View cannot be claimed | Throws `SecretUnavailableException` |
+| Invalid token length | Throws `IllegalArgumentException` before repository access |
+| Null secret ID | Throws `SecretUnavailableException` before repository access |
+| Token hashing | Verifies the correct SHA-256 hash is passed to the repository |
+| Secret missing after view claim | Throws `IllegalStateException` |
 
-- 256-bit access tokens from `SecureRandom`; only their SHA-256 hash is persisted, reducing exposure if database contents are read.
-- Base64URL encoding is transport encoding, not encryption.
-- A single conditional `UPDATE` claims views atomically, so concurrent requests cannot both consume the last view.
-- Unavailable-secret conditions return a uniform 404 body through `SecretUnavailableException` and `GlobalExceptionHandler`.
+These tests use a mocked `SecretRepository`, so they do not execute actual PostgreSQL queries.
 
-**Current limitations — important**
+An additional Spring Boot context-load test exists in `PrivatedropBackendApplicationTests`.
 
-- `SecurityConfig` requires authentication for **every** endpoint using HTTP Basic and disables CSRF. There is no custom user store, no recipient token authentication and no secret-specific authorization. Spring Boot's generated default credentials are not a production identity solution.
-- The application does not enforce HTTPS, rate limiting, account lockout, or request-size limits of its own.
-- The backend does not encrypt or decrypt payloads and cannot reveal plaintext. Client-side encryption/decryption is an architectural goal, not code in this repository.
-- Screenshots, copying and malicious browser extensions cannot be prevented by this design.
-- Error handling for malformed input is inconsistent, and automated test coverage is minimal.
-- **Production deployment requires additional security hardening and review.** Do not treat this code as production-ready.
+### Run Tests
 
-## Documentation
+Windows PowerShell:
 
-Technical implementation notes are in [`docs/PrivateDrop-Technical-Documentation.docx`](docs/PrivateDrop-Technical-Documentation.docx).
+```powershell
+.\mvnw.cmd test
+```
+
+To run the complete Maven verification lifecycle:
+
+```powershell
+.\mvnw.cmd clean verify
+```
+
+The application context test requires a working database configuration and the `DB_PASSWORD` environment variable.
+
+**Testing limitations:** Automated repository integration tests, database concurrency tests and end-to-end tests are not yet implemented.
+
+A previous manual concurrency check using concurrent PowerShell requests produced one successful claim and one unavailable response for a secret limited to one view. This was a manual verification, not an automated test.
+
+## 9. Security Design
+
+Important security decisions in the current backend:
+
+- **Client-encrypted data:** The backend accepts encrypted payloads and does not implement plaintext encryption or decryption.
+- **Random access tokens:** Tokens are generated using Java's `SecureRandom`.
+- **Token hashing:** Only the SHA-256 hash is stored in the database.
+- **Atomic view claiming:** Conditional database updates protect view limits against concurrent claims.
+- **Generic error responses:** Unavailable-secret conditions share the same response to reduce information leakage.
+- **Defensive byte-array copying:** Prevents callers from directly modifying the entity's internal byte-array values.
+
+### Current Security Limitations
+
+The current application is not production-ready.
+
+- All endpoints currently require HTTP Basic authentication.
+- CSRF is disabled in the current security configuration.
+- There is no custom user store or recipient-specific authentication flow.
+- HTTPS is not enforced by the application.
+- Rate limiting and account lockout are not implemented.
+- CORS and Content Security Policy have not been configured for a production frontend.
+- There is no dedicated request-size limiting strategy.
+- Malformed input handling is not yet consistent across all endpoints.
+- The frontend and browser-side encryption/decryption are not implemented.
+- Screenshots, copying and malicious browser extensions cannot be prevented by this architecture.
+
+Production deployment requires additional security hardening, security review and appropriate infrastructure configuration.
+
+## 10. Planned Improvements
+
+- Build the frontend using a suitable modern web framework.
+- Implement client-side AES-256-GCM encryption and decryption using Web Crypto API.
+- Keep the encryption key separate from the backend access token.
+- Implement a secure share-link and reveal workflow.
+- Introduce an appropriate recipient authentication mechanism.
+- Improve validation and consistent API error responses.
+- Add automated repository integration and concurrency tests.
+- Implement secret revocation and expiry cleanup.
+- Add database migrations using Flyway or Liquibase.
+- Introduce production security controls, including HTTPS, CORS, CSP, rate limiting and security headers.
+- Review logging, monitoring and sensitive-data handling.
+
+## 11. Documentation
+
+Additional technical implementation details are available in:
+
+[`docs/PrivateDrop-Technical-Documentation.docx`](docs/PrivateDrop-Technical-Documentation.docx)
+
+---
+
+**PrivateDrop — Built incrementally, with security and learning at the centre.**
